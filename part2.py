@@ -13,12 +13,16 @@ logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger.info('logging started')
 
 K = 50
-ALPHA = 0.01
+ALPHA = 0.008
 LAMBDA = 0.01
-NUM_EPOCHS = 25
+NUM_EPOCHS = 15
 rate_min = 0.5
 rate_max = 5.0
 LR_DECAY = 0.01
+
+# train_file = 'csv/train_20M_withratings.csv'
+# test_file  = 'csv/test_20M_withoutratings.csv'
+
 # train_file = 'csv/test_100k_withoutratings.csv'
 # test_file = 'csv/test_100k_withratings.csv'
 
@@ -231,16 +235,7 @@ if __name__ == '__main__':
 
     conn = sqlite3.connect(db_file)
     init_db(conn)
-    n_users, n_items, global_mean, user_to_idx, item_to_idx, \
-        user_counts, item_counts = load_data_to_db(conn, train_file)
-
-    mu, bu, bi, P, Q = train_model(
-    n_users, n_items, user_to_idx, item_to_idx,
-    user_counts, item_counts, conn,          
-    global_mean=global_mean
-)
-
-    predict_all(test_file, output_file,
-                user_to_idx, item_to_idx,
-                mu, bu, bi, P, Q, global_mean)
+    n_users, n_items, global_mean, user_to_idx, item_to_idx, user_counts, item_counts = load_data_to_db(conn, train_file)
+    mu, bu, bi, P, Q = train_model(n_users, n_items, user_to_idx, item_to_idx,user_counts, item_counts, conn, global_mean=global_mean)
+    predict_all(test_file, output_file, user_to_idx, item_to_idx, mu, bu, bi, P, Q, global_mean)
     conn.close()
