@@ -69,7 +69,7 @@ def make_holdout(input_file, ratio=0.1, seed=42):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Create a local holdout split for COMP3208')
-    parser.add_argument('--input', default='train_100k_withratings.csv',
+    parser.add_argument('--input', default='csv/train_100k_withratings.csv',
                         help='Path to the training CSV with ratings')
     parser.add_argument('--ratio', type=float, default=0.1,
                         help='Fraction of rows to hold out as test (default: 0.1)')

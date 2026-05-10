@@ -12,14 +12,14 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger.info('logging started')
 
-K = 20
-ALPHA = 0.005
-LAMBDA = 0.02
-NUM_EPOCHS = 20
+K = 50
+ALPHA = 0.01
+LAMBDA = 0.01
+NUM_EPOCHS = 25
 rate_min = 0.5
 rate_max = 5.0
-
-# train_file = 'csv/train_100k_withratings.csv'
+LR_DECAY = 0.01
+# train_file = 'csv/test_100k_withoutratings.csv'
 # test_file = 'csv/test_100k_withratings.csv'
 
 # testing
@@ -49,6 +49,9 @@ def load_data_to_db(conn, filename):
 
     user_set = set()
     item_set = set()
+    raw_user_cnt = {}
+    raw_item_cnt = {}
+
     total_rating = 0.0
     total_count = 0
 
@@ -76,6 +79,10 @@ def load_data_to_db(conn, filename):
         c.execute(insert_query, (uid_str, iid_str, rat_str))
         user_set.add(uid_str)
         item_set.add(iid_str)
+
+        raw_user_cnt[uid_str] = raw_user_cnt.get(uid_str, 0) + 1
+        raw_item_cnt[iid_str] = raw_item_cnt.get(iid_str, 0) + 1
+
         total_rating += float(rat_str)
         total_count += 1
 
@@ -98,9 +105,18 @@ def load_data_to_db(conn, filename):
 
     n_users = len(user_id)
     n_items = len(item_id)
+
+    user_counts = np.zeros(n_users, dtype=np.float64)
+    item_counts = np.zeros(n_items, dtype=np.float64)
+    for uid_str, cnt in raw_user_cnt.items():
+        user_counts[user_id[uid_str]] = cnt
+    for iid_str, cnt in raw_item_cnt.items():
+        item_counts[item_id[iid_str]] = cnt
+
+
     global_mean = total_rating / total_count if total_count > 0 else 0.0
 
-    return n_users, n_items, global_mean, user_id, item_id
+    return n_users, n_items, global_mean, user_id, item_id, user_counts, item_counts
 
 def db_helper(conn, batch_size=10_000):
     logger.info('===DB Helper===')
@@ -124,87 +140,107 @@ def init_model(n_users, n_items, global_mean):
     bu = np.zeros(n_users, dtype=np.float64)
     bi = np.zeros(n_items, dtype=np.float64)
 
-    P = np.random.normal(0, scale=0.1, size=(n_users, K))
-    Q = np.random.normal(0, scale=0.1, size=(n_items, K))
+    P = np.random.normal(0, scale=0.01, size=(n_users, K))
+    Q = np.random.normal(0, scale=0.01, size=(n_items, K))
 
     logger.info('===Model initialised===')
     return mean, bu, bi, P, Q
 
-def train_model(n_users, n_items, user_id, item_id, conn, k=K, alpha=ALPHA, lambda_=LAMBDA, num_epochs=NUM_EPOCHS, global_mean=0.0):
+def train_model(n_users, n_items, user_id, item_id,  user_counts, item_counts, conn, k=K, alpha=ALPHA, lm=LAMBDA, num_epochs=NUM_EPOCHS, global_mean=0.0):
     logger.info('Training model')
 
     mu, bu, bi, P, Q = init_model(n_users, n_items, global_mean)
     errs = 0.0
+    
+    lambda_u = lm / np.sqrt(np.maximum(user_counts, 1))
+    lambda_i = lm / np.sqrt(np.maximum(item_counts, 1))
 
     for epoch in range(num_epochs):
         count = 0
+        errs = 0.0
 
+        alpha_t = alpha / (1.0+ LR_DECAY * epoch)
         for batch in db_helper(conn):
-            # TODO: shuffling improves convergence
+
+            random.shuffle(batch)
+
             for(uid_str, iid_str, rating) in batch:
                 uid = user_id[str(uid_str)]
                 iid = item_id[str(iid_str)]
                 r_ui = float(rating)
 
                 pred = mu + bu[uid] + bi[iid] + np.dot(P[uid], Q[iid])
+                pred = max(rate_min, min(rate_max, pred))
                 err = r_ui - pred
 
+                lm_u = lambda_u[uid]
+                lm_i = lambda_i[iid]
+
                 # Update biases
-                bu[uid] += alpha * (err - lambda_ * bu[uid])
-                bi[iid] += alpha * (err - lambda_ * bi[iid])
+                bu[uid] += alpha_t * (err - lm_u * bu[uid])
+                bi[iid] += alpha_t * (err - lm_i * bi[iid])
 
                 # Update latent factors
                 p_old = P[uid].copy()
-                P[uid] += alpha * (err * Q[iid] - lambda_ * P[uid])
-                Q[iid] += alpha * (err * p_old   - lambda_ * Q[iid])
+                P[uid] += alpha_t * (err * Q[iid] - lm_u * P[uid])
+                Q[iid] += alpha_t * (err * p_old   - lm_i * Q[iid])
 
                 count += 1
-                if count % 100_000 == 0:
-                    logger.info(f'Epoch {epoch+1}/{num_epochs}, processed {count:,} ratings...')
                 errs += abs(err)
 
-                mae = errs / count if count > 0 else float('inf')
-                logger.info(f'Epoch {epoch+1}/{num_epochs}  MAE = {mae:.4f}')   
-                errs = 0.0
+                if count % 100_000 == 0:
+                    logger.info(f'Epoch {epoch+1}/{num_epochs}, processed {count:,} ratings...')
+
+        mae = errs / count if count > 0 else float('inf')
+        logger.info(f'Epoch {epoch+1}/{num_epochs}  MAE = {mae:.4f}')   
     
     return mu, bu, bi, P, Q
 
-def predict(conn, user_id, item_id, mu, bu, bi, P, Q):
-
-    rating = mu + bu[user_id] + bi[item_id] + np.dot(P[user_id], Q[item_id])
-    return float(max(rate_min, min(rate_max, rating)))
-
-def predict_all(user_id, item_id, mu, bu, bi, P, Q):
+def predict_all(test_filepath, output_filepath, user_id, item_id, mu, bu, bi, P, Q, global_mean):
     logger.info('Predicting all ratings')
 
-    c = conn.cursor()
-    c.execute('SELECT UserID, ItemID FROM ratings')
-    predictions = []
+    with codecs.open(test_filepath, 'r', 'utf-8', errors='replace') as fin, \
+         open(output_filepath, 'w') as fout:
+ 
+        for line in fin:
+            parts = line.strip().split(',')
+            if len(parts) < 3:
+                continue
+            uid_str, iid_str, ts = parts[0], parts[1], parts[2]
+ 
+            u = user_id.get(str(uid_str))
+            i = item_id.get(str(iid_str))
+ 
+            if u is not None and i is not None:
+                pred = mu + bu[u] + bi[i] + np.dot(P[u], Q[i])
+            elif u is None and i is not None:
+                pred = mu + bi[i]
+            elif u is not None and i is None:
+                pred = mu + bu[u]
+            else:
+                pred = global_mean
+ 
+            pred = float(max(rate_min, min(rate_max, pred)))
+            fout.write(f'{uid_str},{iid_str},{pred:.4f},{ts}\n')
+ 
+    logger.info('Predictions saved to %s', output_filepath)
 
-    for uid_str, iid_str in c:
-        uid = user_id[str(uid_str)]
-        iid = item_id[str(iid_str)]
-        pred_rating = predict(conn, uid, iid, mu, bu, bi, P, Q)
-        predictions.append((uid_str, iid_str, pred_rating))
-
-    c.close()
-
-    with open(output_file, 'w') as f:
-        f.write('UserID,ItemID,Rating\n')
-        for uid_str, iid_str, pred_rating in predictions:
-            f.write(f'{uid_str},{iid_str},{pred_rating:.4f}\n')
-
-    logger.info('Predictions saved to results.csv')
 
 if __name__ == '__main__':
     logger.info('===System init===')
 
     conn = sqlite3.connect(db_file)
     init_db(conn)
-    n_users, n_items, global_mean, user_to_idx, item_to_idx = load_data_to_db(conn, train_file)
-    mu, bu, bi, P, Q = train_model(n_users, n_items, user_to_idx, item_to_idx, conn, global_mean=global_mean)
-    predict_all(
-        user_to_idx, item_to_idx,
-        mu, bu, bi, P, Q
-        )
+    n_users, n_items, global_mean, user_to_idx, item_to_idx, \
+        user_counts, item_counts = load_data_to_db(conn, train_file)
+
+    mu, bu, bi, P, Q = train_model(
+    n_users, n_items, user_to_idx, item_to_idx,
+    user_counts, item_counts, conn,          
+    global_mean=global_mean
+)
+
+    predict_all(test_file, output_file,
+                user_to_idx, item_to_idx,
+                mu, bu, bi, P, Q, global_mean)
     conn.close()
