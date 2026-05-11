@@ -4,7 +4,7 @@ import sqlite3
 import codecs
 
 # Connect to (or create) the database
-conn = sqlite3.connect('comp3208_20m.db')
+conn = sqlite3.connect('ratings.db')
 c = conn.cursor()
 
 # Create the table
