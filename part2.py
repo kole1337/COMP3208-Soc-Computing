@@ -1,3 +1,19 @@
+"""
+COMP3208 Coursework - Assignment 2
+Developed by: Nikola Parushev np3g22@soton.ac.uk
+11/05/2026
+"""
+
+"""
+Sources:
+    https://surprise.readthedocs.io/en/stable/matrix_factorization.html
+    https://medium.com/data-science/recommender-system-singular-value-decomposition-svd-truncated-svd-97096338f361
+    https://www.ibm.com/think/topics/singular-value-decomposition
+    https://math.mit.edu/~gs/linearalgebra/ila5/linearalgebra5_7-1.pdf
+    https://arxiv.org/pdf/2203.11026
+
+"""
+
 import sys
 import codecs
 import math
@@ -6,33 +22,52 @@ import sqlite3
 import random
 import numpy as np
 
-
+# Logging - used for debugging - log format will print
+# INFO, WARNING, ERROR logs in cmd, with time and additional messages
 LOG_FORMAT = ('%(levelname) -s %(asctime)s %(message)s')
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger.info('logging started')
 
+"""
+Global variables:
+    K          - number of latent factors. Captures user/item relationship
+    ALPHA      - SGD learning rate. Step size during gradient descent
+    LAMBDA     - L2 regularisation strength. Prevents overfitting by penalising
+                 large weights
+    NUM_EPOCHS - full cycles over the train data
+    LR_DECAY   - Learning decay. alpha_t = ALPHA / (1+LR_DECAY * epoch)
+"""
 K = 50
 ALPHA = 0.008
 LAMBDA = 0.01
 NUM_EPOCHS = 15
+LR_DECAY = 0.01
 rate_min = 0.5
 rate_max = 5.0
-LR_DECAY = 0.01
 
+# real data
 # train_file = 'csv/train_20M_withratings.csv'
 # test_file  = 'csv/test_20M_withoutratings.csv'
 
+# quick test with small data
 # train_file = 'csv/test_100k_withoutratings.csv'
 # test_file = 'csv/test_100k_withratings.csv'
 
-# testing
+# split testing for MAE score
 train_file = 'local_train.csv'
 test_file  = 'local_test.csv'
 
-db_file = 'comp3208_20m.db'
+db_file = 'ratings.db'
 output_file = 'results.csv'
 
+"""
+    Create a database for the ratings (if it doesn't exist) and clear it.
+    The database is used for more efficient iteration over the data.
+    
+    *Timestamps are not stored as this implementation does not use it - for more
+    accurate algorithm, timestamps can be used to determine rating relevance
+"""
 def init_db(conn):
     c = conn.cursor()
     c.execute('''
@@ -48,6 +83,27 @@ def init_db(conn):
     c.close()
     logger.info('Database initialised')
 
+
+"""
+    Input the data from the training file into the database.
+
+    Variables initialised/used{
+        user_id
+        item_id
+        user_items - list of items rated, used by SVD to complete implicit feedback sum
+    }
+
+    Input{
+        conn - open db connection
+        filename - path to training file
+    }
+
+    Output{
+        n_users, n_items, global_mean, 
+        user_id, item_id, user_counts, 
+        item_counts
+    }
+"""
 def load_data_to_db(conn, filename):
     logger.info('Loading data')
 
@@ -63,6 +119,7 @@ def load_data_to_db(conn, filename):
 
     insert_query = 'INSERT INTO ratings (UserID, ItemID, Rating) VALUES (?,?,?)'
     interval = 100_000
+
 
     read = codecs.open(filename, 'r', 'utf-8', errors='replace')
     for line in read:
@@ -106,7 +163,6 @@ def load_data_to_db(conn, filename):
 
     user_id = {uid: idx for idx, uid in enumerate(user_set)}
     item_id = {iid: idx for idx, iid in enumerate(item_set)}
-
     n_users = len(user_id)
     n_items = len(item_id)
 
@@ -122,6 +178,9 @@ def load_data_to_db(conn, filename):
 
     return n_users, n_items, global_mean, user_id, item_id, user_counts, item_counts
 
+"""
+    Helper function to pull batch_size rows for iteration.
+"""
 def db_helper(conn, batch_size=10_000):
     logger.info('===DB Helper===')
     c = conn.cursor()
@@ -137,6 +196,11 @@ def db_helper(conn, batch_size=10_000):
     c.close()
     logger.info('==DB Helper done==')
 
+"""
+    Initialisation of the training model. This implementation uses SVD++ model for
+    better data relevance forgor
+    
+"""
 def init_model(n_users, n_items, global_mean):
     logger.info('===Initialising model===')
     mean = global_mean
